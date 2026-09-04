@@ -27,17 +27,68 @@ storage). These are **not** what the browser will report — WebGPU caps
 `maxStorageBufferBindingSize` at 128 MiB and workgroup storage at 16 KiB. The
 engine must be written to the browser numbers, not these.
 
-**Browser half: TODO.** Needs `rustup` + `wasm32-unknown-unknown` + `wasm-pack`,
-then:
+**Browser half — Zen: PASS** (2026-09-04)
 
-```
-wasm-pack build crates/kiln-wasm --target web --out-dir ../../web/pkg
-python -m http.server -d web    # or any static server
+`http://localhost:8000` (kiln-wasm `probe()`) in Zen on Arch:
+
+```json
+{"adapter":"","backend":"BrowserWebGpu","shader_f16":true,
+ "subgroups":false,"max_storage_buffer_binding_size_mib":1024,
+ "hello_compute_ok":true}
 ```
 
-Open `localhost:8000` in **Chrome** and in **Zen**. Record both `probe()` JSON
-blobs here. Key question: does Zen-on-Linux expose WebGPU at all? (Firefox Linux
-WebGPU is Nightly-only as of Sept 2026; Zen tracks Firefox stable.)
+- **Zen HAS working WebGPU compute on Linux.** `requestAdapter()` returns a real
+  `GPUAdapter`; the `x*2` compute shader ran and returned correct output. The
+  research's "Firefox Linux WebGPU is Nightly-only" is bypassed here — the dev
+  box has `gfx.webgpu.force-enabled = true` set (from an earlier unrelated
+  session), which skips the GPU blocklist.
+- `shader_f16: true` — f16 is available.
+- **`subgroups: false`** — not exposed in Zen (Firefox stable doesn't ship the
+  feature). Confirms the plan: split-K attention, scalar reductions, no
+  `subgroupAdd`. Feature-detect and provide the scalar path unconditionally.
+- `max_storage_buffer_binding_size: 1024 MiB` — Zen is *more* generous than the
+  128 MiB WebGPU baseline. Still design to 128 MiB (Chrome/Safari default) for
+  portability; Zen won't be the binding-size constraint.
+- `adapter: ""` — Firefox does not populate the adapter name (fingerprinting
+  defense). Don't rely on GPU name/vendor strings on this browser.
+- Prereqs installed for this: replaced Arch `rust` with `rustup`,
+  `rustup target add wasm32-unknown-unknown`, `cargo install wasm-pack`.
+- Needed the async-readback fix first (`std::sync::mpsc::recv()` deadlocked the
+  wasm thread — the probe hung on "running…" until that landed).
+
+**Browser half — Chromium: PASS** (2026-09-04)
+
+Chromium on Arch, launched `--enable-unsafe-webgpu --enable-features=Vulkan`:
+
+```json
+{"adapter":"","backend":"BrowserWebGpu","shader_f16":true,
+ "subgroups":false,"max_storage_buffer_binding_size_mib":4095,
+ "hello_compute_ok":true}
+```
+
+- Compute works. f16 available.
+- **`subgroups: false` — same as Zen, and this is the notable result.** Chrome
+  has supported WebGPU subgroups at the browser level since Chrome 134. Reading
+  `false` here means the **Rust `wgpu` 30 WebGPU-on-wasm backend does not surface
+  the subgroups feature** through `adapter.features()`. The RUST research report
+  flagged this exact uncertainty ("whether the Rust wgpu crate exposes subgroup
+  features on the WebGPU flag — no public confirmation"). Now confirmed negative
+  for plain `subgroups`.
+  - **Consequence for kiln:** scalar reduction path everywhere — split-K
+    attention, scalar RMSNorm / matvec. No `subgroupAdd`, no subgroup-matrix,
+    on *any* browser via the Rust+wasm route, until wgpu closes this gap. This
+    is already the CLAUDE.md plan; the finding just removes the "maybe we get a
+    fast path on Chrome" option.
+- `max_storage_buffer_binding_size: 4095 MiB` is inflated by
+  `--enable-unsafe-webgpu` (removes limit bucketing). A normal Chrome user gets
+  **128 MiB** — design to that.
+
+### Spike 1 summary
+
+WebGPU compute works on both target browsers. Design constraints locked:
+`shader-f16` yes, subgroups **no** (wgpu-wasm limitation, not browser),
+`maxStorageBufferBindingSize` **128 MiB** (portable baseline), no adapter
+name/vendor strings on Firefox.
 
 ---
 
