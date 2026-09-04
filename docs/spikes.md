@@ -164,8 +164,10 @@ identity-nibble cases and run in CI without the model file.
   the GPU, fused into matmul).
 - `d`/`dmin` are decoded with `unpack2x16float` in WGSL — confirmed to match the
   Rust `f16_to_f32`. No `shader-f16` feature needed for the *unpack*.
-- Q6_K (used for ~half the Qwen3-0.6B tensors — `attn_v`, `ffn_down` on many
-  layers) is still TODO. Same harness, different block layout (210 bytes).
+- Q6_K CPU dequant added later (feat/gguf-metadata-q6k-q8): bit-exact vs the
+  `gguf` package on `output.weight` (Q6_K LM head, 155M elems) and `attn_v`.
+  Q8_0 covered by unit test (no Q8_0 tensor in Qwen3-0.6B). WGSL kernels for
+  Q6_K/Q8_0 land with the forward-pass kernel PRs.
 
 ---
 
