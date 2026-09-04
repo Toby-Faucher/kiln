@@ -1,0 +1,18 @@
+[package]
+name = "kiln-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "kiln engine core: wgpu device, GGUF loading, WGSL kernels, forward pass"
+
+[dependencies]
+wgpu.workspace = true
+bytemuck.workspace = true
+thiserror.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+pollster.workspace = true
+anyhow.workspace = true

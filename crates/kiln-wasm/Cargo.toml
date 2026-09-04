@@ -1,0 +1,27 @@
+[package]
+name = "kiln-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "kiln browser bindings — the API the Web Worker talks to"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+kiln-core = { path = "../kiln-core" }
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+js-sys.workspace = true
+console_error_panic_hook.workspace = true
+
+[dependencies.wgpu]
+workspace = true
+features = ["webgpu"]
+
+[dependencies.web-sys]
+workspace = true
+features = ["console"]

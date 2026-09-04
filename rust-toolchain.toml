@@ -1,0 +1,6 @@
+# Requires rustup. The Arch system `rust` package ignores this file — install
+# rustup and run `rustup target add wasm32-unknown-unknown` for the browser build.
+[toolchain]
+channel = "stable"
+targets = ["wasm32-unknown-unknown"]
+components = ["rust-src", "clippy", "rustfmt"]

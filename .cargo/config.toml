@@ -1,0 +1,11 @@
+# Build flags applied ONLY when targeting wasm32 (native builds are untouched).
+# Rationale for each feature is in CLAUDE.md.
+[target.wasm32-unknown-unknown]
+rustflags = [
+    "--cfg=web_sys_unstable_apis",
+    "-Ctarget-feature=+simd128,+bulk-memory,+mutable-globals,+reference-types,+sign-ext,+nontrapping-fptoint",
+]
+
+[build]
+# Uncomment to make wasm the default target for `cargo build` in this repo:
+# target = "wasm32-unknown-unknown"
