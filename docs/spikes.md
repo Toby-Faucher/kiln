@@ -56,12 +56,39 @@ engine must be written to the browser numbers, not these.
 - Needed the async-readback fix first (`std::sync::mpsc::recv()` deadlocked the
   wasm thread — the probe hung on "running…" until that landed).
 
-**Browser half — Chrome: TODO.** Same URL in Chrome/Chromium for the baseline
-(expect `subgroups: true`, `max_storage_buffer_binding_size: 128`, a populated
-adapter name).
+**Browser half — Chromium: PASS** (2026-09-04)
 
-**webgpureport.org:** worth capturing from both browsers for the full limit
-table, but the probe covers what the engine gates on.
+Chromium on Arch, launched `--enable-unsafe-webgpu --enable-features=Vulkan`:
+
+```json
+{"adapter":"","backend":"BrowserWebGpu","shader_f16":true,
+ "subgroups":false,"max_storage_buffer_binding_size_mib":4095,
+ "hello_compute_ok":true}
+```
+
+- Compute works. f16 available.
+- **`subgroups: false` — same as Zen, and this is the notable result.** Chrome
+  has supported WebGPU subgroups at the browser level since Chrome 134. Reading
+  `false` here means the **Rust `wgpu` 30 WebGPU-on-wasm backend does not surface
+  the subgroups feature** through `adapter.features()`. The RUST research report
+  flagged this exact uncertainty ("whether the Rust wgpu crate exposes subgroup
+  features on the WebGPU flag — no public confirmation"). Now confirmed negative
+  for plain `subgroups`.
+  - **Consequence for kiln:** scalar reduction path everywhere — split-K
+    attention, scalar RMSNorm / matvec. No `subgroupAdd`, no subgroup-matrix,
+    on *any* browser via the Rust+wasm route, until wgpu closes this gap. This
+    is already the CLAUDE.md plan; the finding just removes the "maybe we get a
+    fast path on Chrome" option.
+- `max_storage_buffer_binding_size: 4095 MiB` is inflated by
+  `--enable-unsafe-webgpu` (removes limit bucketing). A normal Chrome user gets
+  **128 MiB** — design to that.
+
+### Spike 1 summary
+
+WebGPU compute works on both target browsers. Design constraints locked:
+`shader-f16` yes, subgroups **no** (wgpu-wasm limitation, not browser),
+`maxStorageBufferBindingSize` **128 MiB** (portable baseline), no adapter
+name/vendor strings on Firefox.
 
 ---
 
