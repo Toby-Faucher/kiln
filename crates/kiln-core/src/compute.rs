@@ -7,6 +7,31 @@
 use crate::gpu::GpuContext;
 use wgpu::util::DeviceExt;
 
+/// Map a `MAP_READ` buffer and return its bytes.
+///
+/// Cross-platform: on native, `device.poll(Wait)` drives the callback to
+/// completion before the `await`; on WebGPU, `poll` is a no-op and the browser
+/// event loop fires the callback while the `await` is suspended. Using a
+/// blocking `mpsc::recv()` here instead deadlocks the single wasm thread —
+/// the event loop can never run the map callback.
+pub(crate) async fn read_buffer(ctx: &GpuContext, buffer: &wgpu::Buffer) -> Vec<u8> {
+    let slice = buffer.slice(..);
+    let (tx, rx) = futures_channel::oneshot::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+    rx.await
+        .expect("map_async callback dropped")
+        .expect("buffer map failed");
+    let data = slice
+        .get_mapped_range()
+        .expect("get_mapped_range after successful map")
+        .to_vec();
+    buffer.unmap();
+    data
+}
+
 /// Run `hello_compute.wgsl` over `input` and read the result back.
 ///
 /// This round-trips CPU -> GPU -> CPU (slow, map-read every call) on purpose:
@@ -64,17 +89,6 @@ pub async fn hello_compute(ctx: &GpuContext, input: &[f32]) -> Vec<f32> {
     encoder.copy_buffer_to_buffer(&storage, 0, &readback, 0, byte_len);
     ctx.queue.submit([encoder.finish()]);
 
-    let slice = readback.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |r| {
-        let _ = tx.send(r);
-    });
-    ctx.device.poll(wgpu::PollType::wait_indefinitely()).ok();
-    rx.recv().unwrap().unwrap();
-
-    let view = slice.get_mapped_range().expect("map readback buffer");
-    let out = bytemuck::cast_slice::<u8, f32>(&view).to_vec();
-    drop(view);
-    readback.unmap();
-    out
+    let bytes = read_buffer(ctx, &readback).await;
+    bytemuck::cast_slice::<u8, f32>(&bytes).to_vec()
 }
