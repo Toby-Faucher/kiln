@@ -240,3 +240,14 @@ kiln      : [12095, 13, 576, 6722, 315]  = " Paris" "." " The" " capital" " of"
 - Perf: ~10 s/forward for a 5-token prompt in release (no KV cache, naive scalar
   matmul). Fine for an oracle; this is the thing the GPU replaces.
 - llama.cpp oracle now at `~/Projects/_ref/llama.cpp` — see CLAUDE.md.
+
+---
+
+## Phase 1 — WGSL kernels (each diffed vs `ops.rs`)
+
+Harness: `kiln_core::gpu_ops`, one fn per kernel mirroring the `ops.rs`
+signature, `#[ignore]`d GPU tests (`cargo test -p kiln-core -- --ignored`).
+
+| Kernel | Status | GPU vs CPU rel err |
+|---|---|---|
+| `rmsnorm` (scalar workgroup reduction, no subgroups) | PASS (2026-09-04) | < 1e-5 |
