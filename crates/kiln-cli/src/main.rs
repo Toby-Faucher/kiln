@@ -1,10 +1,11 @@
-//! Native spike harness. Subcommands map 1:1 to the plan in `CLAUDE.md`.
+//! Native spike / dev harness. Subcommands map to the plan in `CLAUDE.md`.
 //!
-//!   kiln probe                    — spike #1: adapter report + hello_compute.
-//!   kiln tensors <model.gguf>     — list Q4_K/Q6_K/Q8_0/F32/F16 tensors.
+//!   kiln probe                       — adapter report + hello_compute (spike #1)
+//!   kiln config  <model.gguf>        — resolved model hyperparameters
+//!   kiln tensors <model.gguf>        — list every tensor with dtype/dims
 //!   kiln dequant <model.gguf> [tensor]
-//!                                 — spike #2: dequant one Q4_K tensor on GPU and
-//!                                   CPU, report max abs/rel error.
+//!                                    — dequant one Q4_K tensor GPU vs CPU (spike #2)
+//!   kiln dequant --all <model.gguf>  — CPU-dequant every tensor, sanity check
 
 use anyhow::{bail, Context, Result};
 use kiln_core::gguf::{GgmlType, Gguf};
@@ -13,17 +14,66 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("probe") => pollster::block_on(probe()),
+        Some("config") => config(args.get(1).context("usage: kiln config <model.gguf>")?),
         Some("tensors") => tensors(args.get(1).context("usage: kiln tensors <model.gguf>")?),
+        Some("dequant") if args.get(1).map(String::as_str) == Some("--all") => dequant_all(
+            args.get(2)
+                .context("usage: kiln dequant --all <model.gguf>")?,
+        ),
         Some("dequant") => pollster::block_on(dequant(
             args.get(1)
                 .context("usage: kiln dequant <model.gguf> [tensor]")?,
             args.get(2).map(String::as_str),
         )),
         _ => {
-            eprintln!("usage: kiln <probe | tensors <gguf> | dequant <gguf> [tensor]>");
+            eprintln!(
+                "usage: kiln <probe | config <gguf> | tensors <gguf> | \
+                 dequant <gguf> [tensor] | dequant --all <gguf>>"
+            );
             std::process::exit(2);
         }
     }
+}
+
+fn config(path: &str) -> Result<()> {
+    let g = Gguf::open(path).context("open gguf")?;
+    let c = g.config().context("resolve config")?;
+    println!("{c:#?}");
+    Ok(())
+}
+
+fn dequant_all(path: &str) -> Result<()> {
+    let g = Gguf::open(path).context("open gguf")?;
+    let mut names: Vec<&str> = g.tensor_names().collect();
+    names.sort_unstable();
+
+    let mut bad = 0usize;
+    for name in &names {
+        let t = g.tensor(name).unwrap();
+        let n = t.n_elements();
+        let raw = g.raw(name)?;
+        let out = kiln_core::dequant::dequant_cpu(t.ggml_type, raw, n)
+            .with_context(|| format!("dequant {name}"))?;
+
+        let nan = out.iter().filter(|v| v.is_nan()).count();
+        let inf = out.iter().filter(|v| v.is_infinite()).count();
+        let absmax = out.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let status = if out.len() != n || nan > 0 || inf > 0 {
+            bad += 1;
+            "BAD "
+        } else {
+            "ok  "
+        };
+        println!(
+            "{status}{name:<34} {:?}  n={n}  |max|={absmax:.4}  nan={nan} inf={inf}",
+            t.ggml_type
+        );
+    }
+    println!("\n{} tensors, {bad} bad", names.len());
+    if bad > 0 {
+        bail!("{bad} tensor(s) failed to dequant cleanly");
+    }
+    Ok(())
 }
 
 async fn probe() -> Result<()> {
@@ -96,46 +146,42 @@ async fn dequant(path: &str, tensor: Option<&str>) -> Result<()> {
     };
 
     let info = g.tensor(&name).context("tensor not found")?.clone();
-    if info.ggml_type != GgmlType::Q4_K {
-        bail!("{name} is {:?}, not Q4_K", info.ggml_type);
-    }
     let n = info.n_elements();
     let raw = g.raw(&name)?;
     println!("tensor : {name}");
     println!(
-        "dims   : {:?}  ({n} elements, {} Q4_K blocks)",
-        info.dims,
-        n / 256
+        "dims   : {:?}  ({n} elements, {:?})",
+        info.dims, info.ggml_type
     );
 
-    let cpu = kiln_core::dequant::q4k_cpu(raw, n).context("cpu dequant")?;
-
-    let ctx = kiln_core::gpu::acquire(false)
-        .await
-        .context("acquire gpu")?;
-    let gpu = kiln_core::dequant::q4k_gpu(&ctx, raw, n)
-        .await
-        .context("gpu dequant")?;
-
-    let (abs, rel) = kiln_core::dequant::max_error(&cpu, &gpu);
+    let cpu = kiln_core::dequant::dequant_cpu(info.ggml_type, raw, n).context("cpu dequant")?;
     println!("cpu[..6]: {:?}", &cpu[..6.min(cpu.len())]);
-    println!("gpu[..6]: {:?}", &gpu[..6.min(gpu.len())]);
-    println!("max abs error: {abs:.3e}");
-    println!("max rel error: {rel:.3e}");
 
-    // Optional: dump the CPU result as raw LE f32 for an external oracle check.
-    if let Ok(path) = std::env::var("KILN_DUMP") {
-        let mut bytes = Vec::with_capacity(cpu.len() * 4);
-        for v in &cpu {
-            bytes.extend_from_slice(&v.to_le_bytes());
+    // Dump the CPU result as raw LE f32 for the external oracle check.
+    if let Ok(dump) = std::env::var("KILN_DUMP") {
+        let bytes: Vec<u8> = cpu.iter().flat_map(|v| v.to_le_bytes()).collect();
+        std::fs::write(&dump, bytes).context("write KILN_DUMP")?;
+        println!("wrote cpu dequant -> {dump}");
+    }
+
+    // GPU comparison only where a WGSL kernel exists (Q4_K so far).
+    if info.ggml_type == GgmlType::Q4_K {
+        let ctx = kiln_core::gpu::acquire(false)
+            .await
+            .context("acquire gpu")?;
+        let gpu = kiln_core::dequant::q4k_gpu(&ctx, raw, n)
+            .await
+            .context("gpu dequant")?;
+        let (abs, rel) = kiln_core::dequant::max_error(&cpu, &gpu);
+        println!("gpu[..6]: {:?}", &gpu[..6.min(gpu.len())]);
+        println!("max abs error: {abs:.3e}");
+        println!("max rel error: {rel:.3e}");
+        if rel > 1e-3 {
+            bail!("FAIL: GPU vs CPU relative error {rel:.3e} exceeds 1e-3");
         }
-        std::fs::write(&path, bytes).context("write KILN_DUMP")?;
-        println!("wrote cpu dequant -> {path}");
+        println!("PASS (GPU matches CPU reference within 1e-3)");
+    } else {
+        println!("(no WGSL kernel for {:?} yet — CPU only)", info.ggml_type);
     }
-
-    if rel > 1e-3 {
-        bail!("FAIL: relative error {rel:.3e} exceeds 1e-3");
-    }
-    println!("PASS (GPU matches CPU reference within 1e-3)");
     Ok(())
 }

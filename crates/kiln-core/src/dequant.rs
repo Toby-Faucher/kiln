@@ -1,23 +1,101 @@
-//! Q4_K dequantization: CPU reference + WGSL kernel + a diff harness.
+//! Dequantization: CPU references + WGSL kernels + a diff harness.
 //!
-//! Q4_K super-block (`QK_K = 256` elements, 144 bytes):
-//!   - `d`       f16  super-block scale for the 6-bit sub-block scales
-//!   - `dmin`    f16  super-block scale for the 6-bit sub-block mins
-//!   - `scales`  [u8; 12]  8×(6-bit scale, 6-bit min), bit-packed
-//!   - `qs`      [u8; 128]  256 4-bit quants, low nibble then high nibble
+//! Every CPU path is a line-by-line port of the matching ggml
+//! `dequantize_row_*`. The CPU path is the oracle each WGSL kernel is diffed
+//! against; `scripts/oracle_dequant.py` cross-checks the CPU path itself against
+//! the independent `gguf` Python package.
 //!
-//! Value = `d * scale[sub] * q  -  dmin * min[sub]`.
-//!
-//! The CPU path is a line-by-line port of ggml's `dequantize_row_q4_K` /
-//! `get_scale_min_k4`. It is the oracle the WGSL kernel is diffed against.
+//! Q4_K super-block (`QK_K = 256`, 144 bytes): `d`/`dmin` f16, `scales[12]`
+//! (8×6-bit scale + 6-bit min, packed), `qs[128]` (256 4-bit quants).
+//! Q6_K super-block (256, 210 bytes): `ql[128]` + `qh[64]` (6-bit quants),
+//! `scales[16]` i8, `d` f16.
+//! Q8_0 block (32, 34 bytes): `d` f16, `qs[32]` i8.
 
-use crate::gguf::f16_to_f32;
+use crate::gguf::{f16_to_f32, GgmlType};
 use crate::gpu::GpuContext;
 use crate::{Error, Result};
 use wgpu::util::DeviceExt;
 
 pub const QK_K: usize = 256;
 pub const Q4K_BLOCK_BYTES: usize = 144;
+pub const Q6K_BLOCK_BYTES: usize = 210;
+pub const Q8_0_BLOCK_ELEMS: usize = 32;
+pub const Q8_0_BLOCK_BYTES: usize = 34;
+
+/// Dequantize any supported tensor dtype to f32 on the CPU.
+pub fn dequant_cpu(t: GgmlType, raw: &[u8], n_elements: usize) -> Result<Vec<f32>> {
+    match t {
+        GgmlType::F32 => Ok(bytemuck::cast_slice::<u8, f32>(&raw[..n_elements * 4]).to_vec()),
+        GgmlType::F16 => Ok(raw[..n_elements * 2]
+            .chunks_exact(2)
+            .map(|c| f16_to_f32(u16::from_le_bytes([c[0], c[1]])))
+            .collect()),
+        GgmlType::Q8_0 => q8_0_cpu(raw, n_elements),
+        GgmlType::Q4_K => q4k_cpu(raw, n_elements),
+        GgmlType::Q6_K => q6k_cpu(raw, n_elements),
+    }
+}
+
+/// ggml `dequantize_row_q8_0`: `value = d * q[i]`.
+pub fn q8_0_cpu(raw: &[u8], n_elements: usize) -> Result<Vec<f32>> {
+    if !n_elements.is_multiple_of(Q8_0_BLOCK_ELEMS) {
+        return Err(Error::Shape(format!("{n_elements} not a multiple of 32")));
+    }
+    let n_blocks = n_elements / Q8_0_BLOCK_ELEMS;
+    if raw.len() < n_blocks * Q8_0_BLOCK_BYTES {
+        return Err(Error::Shape("raw buffer too short for Q8_0".into()));
+    }
+    let mut out = Vec::with_capacity(n_elements);
+    for b in 0..n_blocks {
+        let blk = &raw[b * Q8_0_BLOCK_BYTES..(b + 1) * Q8_0_BLOCK_BYTES];
+        let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+        for &q in &blk[2..34] {
+            out.push(d * (q as i8) as f32);
+        }
+    }
+    Ok(out)
+}
+
+/// ggml `dequantize_row_q6_K`.
+pub fn q6k_cpu(raw: &[u8], n_elements: usize) -> Result<Vec<f32>> {
+    if !n_elements.is_multiple_of(QK_K) {
+        return Err(Error::Shape(format!(
+            "{n_elements} not a multiple of {QK_K}"
+        )));
+    }
+    let n_blocks = n_elements / QK_K;
+    if raw.len() < n_blocks * Q6K_BLOCK_BYTES {
+        return Err(Error::Shape("raw buffer too short for Q6_K".into()));
+    }
+    let mut out = vec![0.0f32; n_elements];
+    for b in 0..n_blocks {
+        let blk = &raw[b * Q6K_BLOCK_BYTES..(b + 1) * Q6K_BLOCK_BYTES];
+        let ql = &blk[0..128];
+        let qh = &blk[128..192];
+        let sc = &blk[192..208]; // i8
+        let d = f16_to_f32(u16::from_le_bytes([blk[208], blk[209]]));
+        let y = &mut out[b * QK_K..(b + 1) * QK_K];
+
+        for half in 0..2 {
+            let ql = &ql[half * 64..];
+            let qh = &qh[half * 32..];
+            let sc = &sc[half * 8..];
+            let y = &mut y[half * 128..];
+            for l in 0..32 {
+                let is = l / 16;
+                let q1 = ((ql[l] & 0xF) | ((qh[l] & 3) << 4)) as i8 as i32 - 32;
+                let q2 = ((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) as i8 as i32 - 32;
+                let q3 = ((ql[l] >> 4) | (((qh[l] >> 4) & 3) << 4)) as i8 as i32 - 32;
+                let q4 = ((ql[l + 32] >> 4) | (((qh[l] >> 6) & 3) << 4)) as i8 as i32 - 32;
+                y[l] = d * (sc[is] as i8) as f32 * q1 as f32;
+                y[l + 32] = d * (sc[is + 2] as i8) as f32 * q2 as f32;
+                y[l + 64] = d * (sc[is + 4] as i8) as f32 * q3 as f32;
+                y[l + 96] = d * (sc[is + 6] as i8) as f32 * q4 as f32;
+            }
+        }
+    }
+    Ok(out)
+}
 
 /// ggml `get_scale_min_k4`: unpack the 6-bit scale and min for sub-block `j`
 /// (0..8) from the 12-byte packed `scales` array.
@@ -162,18 +240,8 @@ pub async fn q4k_gpu(ctx: &GpuContext, raw: &[u8], n_elements: usize) -> Result<
     encoder.copy_buffer_to_buffer(&out_buf, 0, &readback, 0, out_bytes);
     ctx.queue.submit([encoder.finish()]);
 
-    let slice = readback.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |r| {
-        let _ = tx.send(r);
-    });
-    ctx.device.poll(wgpu::PollType::wait_indefinitely()).ok();
-    rx.recv().unwrap().unwrap();
-    let view = slice.get_mapped_range().expect("map q4k readback");
-    let out = bytemuck::cast_slice::<u8, f32>(&view).to_vec();
-    drop(view);
-    readback.unmap();
-    Ok(out)
+    let bytes = crate::compute::read_buffer(ctx, &readback).await;
+    Ok(bytemuck::cast_slice::<u8, f32>(&bytes).to_vec())
 }
 
 /// Max absolute and max relative error between two equal-length slices.
@@ -227,5 +295,42 @@ mod tests {
         for (i, &v) in out[..32].iter().enumerate() {
             assert_eq!(v, (i as f32) % 16.0, "mismatch at {i}");
         }
+    }
+
+    /// Q8_0: d = 0.5, qs = [-4, -3, .., 27] => value = 0.5 * q.
+    #[test]
+    fn q8_0_scaled_identity() {
+        let mut blk = vec![0u8; Q8_0_BLOCK_BYTES];
+        blk[0..2].copy_from_slice(&0x3800u16.to_le_bytes()); // d = 0.5
+        for (i, b) in blk[2..34].iter_mut().enumerate() {
+            *b = (i as i32 - 4) as i8 as u8;
+        }
+        let out = q8_0_cpu(&blk, Q8_0_BLOCK_ELEMS).unwrap();
+        for (i, &v) in out.iter().enumerate() {
+            assert_eq!(v, 0.5 * (i as f32 - 4.0), "mismatch at {i}");
+        }
+    }
+
+    /// Q6_K: d = 1.0, all scales = 1, all 6-bit quants = 32 => value = 0.
+    #[test]
+    fn q6k_centered_zero() {
+        let mut blk = vec![0u8; Q6K_BLOCK_BYTES];
+        for b in blk[0..128].iter_mut() {
+            *b = 0x00; // low nibble 0
+        }
+        for b in blk[128..192].iter_mut() {
+            *b = 0b10_10_10_10; // every 2-bit high group = 2 => quant = 0|32 = 32
+        }
+        for b in blk[192..208].iter_mut() {
+            *b = 1; // scales = 1
+        }
+        blk[208..210].copy_from_slice(&0x3C00u16.to_le_bytes()); // d = 1.0
+        let out = q6k_cpu(&blk, QK_K).unwrap();
+        assert_eq!(out.len(), QK_K);
+        assert!(
+            out.iter().all(|&v| v == 0.0),
+            "expected all zeros (q - 32 == 0), got {:?}",
+            &out[..8]
+        );
     }
 }
