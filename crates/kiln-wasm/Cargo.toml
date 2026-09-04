@@ -25,3 +25,30 @@ features = ["webgpu"]
 [dependencies.web-sys]
 workspace = true
 features = ["console"]
+
+# wasm-opt must be told to allow the wasm features our .cargo/config.toml turns on
+# (simd128, bulk-memory, ...), otherwise its validator rejects the input binary.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = [
+    "-O2",
+    "--enable-simd",
+    "--enable-bulk-memory",
+    "--enable-mutable-globals",
+    "--enable-reference-types",
+    "--enable-sign-ext",
+    "--enable-nontrapping-float-to-int",
+]
+
+[package.metadata.wasm-pack.profile.dev]
+wasm-opt = false
+
+[package.metadata.wasm-pack.profile.profiling]
+wasm-opt = [
+    "-O2",
+    "--enable-simd",
+    "--enable-bulk-memory",
+    "--enable-mutable-globals",
+    "--enable-reference-types",
+    "--enable-sign-ext",
+    "--enable-nontrapping-float-to-int",
+]
