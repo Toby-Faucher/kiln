@@ -213,3 +213,30 @@ argmax/readback(avg=8.71 ms, steps=141)
 Design constraints locked: GGUF Q4_K_M + Q8_0, f16 storage / f32 compute,
 scalar reductions (no subgroups), single CommandEncoder per token, GPU-side
 sampling, 128 MiB max binding, OPFS streaming loader.
+
+---
+
+## Phase 1 — CPU reference forward pass
+
+**PASS — matches llama.cpp** (2026-09-04)
+
+`kiln-core::model::Model` — scalar-f32 Qwen3 forward pass (GQA, per-head
+QK-RMSNorm, NEOX RoPE θ=1e6, SwiGLU, no biases, untied LM head). Weights
+dequantized to f32 up front (~2.5 GB RAM for Qwen3-0.6B).
+
+Validation: token ids from `llama-tokenize`, greedy continuation vs
+`llama-simple` on the same GGUF.
+
+```
+prompt : "The capital of France is"  → ids [785, 6722, 315, 9625, 374]
+llama.cpp : "Paris. The capital of"
+kiln      : [12095, 13, 576, 6722, 315]  = " Paris" "." " The" " capital" " of"
+```
+
+5/5 greedy tokens identical. The Qwen3 architecture port is correct.
+
+- `ops.rs` unit tests (rmsnorm, matmul_vec, rope, softmax, silu) + dequant tests:
+  10 pass in CI without the model file.
+- Perf: ~10 s/forward for a 5-token prompt in release (no KV cache, naive scalar
+  matmul). Fine for an oracle; this is the thing the GPU replaces.
+- llama.cpp oracle now at `~/Projects/_ref/llama.cpp` — see CLAUDE.md.

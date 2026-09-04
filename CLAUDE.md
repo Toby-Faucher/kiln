@@ -14,8 +14,11 @@ oversight.
 
 ## Status
 
-Pre-code. Doing the four de-risking spikes (see below) before committing to the
-build.
+**Phase 1 — engine, native, correct.** All four spikes clear (`docs/spikes.md`).
+GGUF reader + `Config` + CPU dequant (Q4_K/Q6_K/Q8_0, Q4_K also WGSL) done. CPU
+reference forward pass for Qwen3 verified against llama.cpp (5 greedy tokens
+identical on "The capital of France is" → " Paris. The capital of"). Next: WGSL
+kernels, each diffed against `model.rs`.
 
 ## The decided stack (do not re-litigate without reason)
 
@@ -76,13 +79,23 @@ Open: #1 browser half, #3, and Q6_K dequant.
    `Access-Control-Expose-Headers: Content-Range`. If it fails, the loader needs
    a proxy or a full-shard-download fallback.
 
-## Numerical validation strategy (both source reports missed this)
+## Numerical validation strategy
 
-The CPU oracle is `llama.cpp` run on the **exact same GGUF file**. Dump per-layer
-activation tensors (ggml has debug hooks / `llama-eval-callback`), compare
-element-wise. Use **relative tolerance ~1e-2 on late layers**, not bit-identity —
-f16 accumulation drift is expected. Bit-identity only applies to fp32 matmul in
-isolation.
+Two oracles, both on the **exact same GGUF file**:
+
+1. **`kiln-core::model`** — the scalar-f32 CPU forward pass. Every WGSL kernel is
+   diffed against the matching `ops.rs` function / the `model.rs` stage. Use
+   relative tolerance ~1e-2 on late-layer activations (f16 accumulation drift),
+   bit-identity only for isolated fp32 ops.
+2. **`llama.cpp`** — cloned at `~/Projects/_ref/llama.cpp` (build:
+   `cmake -B build -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF && cmake --build
+   build -j`). `llama-tokenize -m M -p "..."` for token ids;
+   `llama-simple -m M -n N "..."` for the raw greedy continuation. `model.rs` is
+   validated by matching its greedy tokens.
+
+`scripts/oracle_dequant.py` cross-checks the dequant CPU refs against the `gguf`
+Python package (venv: `uv venv /tmp/kilnvenv && uv pip install --python
+/tmp/kilnvenv/bin/python gguf numpy`).
 
 ## Realistic expectations
 

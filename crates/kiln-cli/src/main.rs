@@ -25,14 +25,69 @@ fn main() -> Result<()> {
                 .context("usage: kiln dequant <model.gguf> [tensor]")?,
             args.get(2).map(String::as_str),
         )),
+        Some("forward") => forward(&args[1..]),
         _ => {
             eprintln!(
                 "usage: kiln <probe | config <gguf> | tensors <gguf> | \
-                 dequant <gguf> [tensor] | dequant --all <gguf>>"
+                 dequant <gguf> [tensor] | dequant --all <gguf> | \
+                 forward <gguf> --tokens a,b,c [--gen N]>"
             );
             std::process::exit(2);
         }
     }
+}
+
+fn forward(args: &[String]) -> Result<()> {
+    let path = args
+        .first()
+        .context("usage: kiln forward <gguf> --tokens a,b,c")?;
+    let mut tokens: Vec<u32> = Vec::new();
+    let mut gen = 0usize;
+    let mut it = args[1..].iter();
+    while let Some(flag) = it.next() {
+        match flag.as_str() {
+            "--tokens" => {
+                tokens = it
+                    .next()
+                    .context("--tokens needs a comma list")?
+                    .split(',')
+                    .map(|s| s.trim().parse::<u32>())
+                    .collect::<std::result::Result<_, _>>()
+                    .context("parse token id")?;
+            }
+            "--gen" => {
+                gen = it
+                    .next()
+                    .context("--gen needs N")?
+                    .parse()
+                    .context("parse N")?
+            }
+            other => bail!("unknown flag {other}"),
+        }
+    }
+    if tokens.is_empty() {
+        bail!("need at least one token via --tokens");
+    }
+
+    let g = Gguf::open(path).context("open gguf")?;
+    eprintln!("loading + dequantizing weights…");
+    let model = kiln_core::model::Model::load(&g).context("load model")?;
+    eprintln!("running forward pass on {} tokens…", tokens.len());
+
+    let logits = model.forward(&tokens);
+    let mut idx: Vec<usize> = (0..logits.len()).collect();
+    idx.sort_unstable_by(|&a, &b| logits[b].total_cmp(&logits[a]));
+    println!("top-5 next-token logits:");
+    for &i in &idx[..5] {
+        println!("  {i:>7}  {:.4}", logits[i]);
+    }
+    println!("argmax: {}", idx[0]);
+
+    if gen > 0 {
+        let out = model.generate(&tokens, gen);
+        println!("greedy continuation ({gen}): {out:?}");
+    }
+    Ok(())
 }
 
 fn config(path: &str) -> Result<()> {
