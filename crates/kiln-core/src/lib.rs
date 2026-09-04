@@ -16,6 +16,7 @@ pub mod dequant;
 pub mod error;
 pub mod gguf;
 pub mod gpu;
+pub mod gpu_ops;
 pub mod model;
 pub mod ops;
 
