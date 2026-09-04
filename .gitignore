@@ -7,4 +7,6 @@
 *.wasm
 *.gguf
 /models
+*.f32
+/.venv
 .DS_Store

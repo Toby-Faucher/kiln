@@ -76,19 +76,45 @@ with `Origin: https://example.com` + `Range: bytes=0-1023`.
 
 ## Spike 2 — Q4_K dequant correctness
 
-**TODO.** The highest-risk item. Plan:
+**PASS — all three legs bit-exact** (2026-09-03)
 
-1. Minimal GGUF v3 reader: header + tensor directory + locate one `Q4_K` tensor
-   (e.g. a `blk.0.ffn_down.weight`) in the Qwen3-0.6B file.
-2. CPU reference dequant of Q4_K (256-elem super-blocks: 8×6-bit scales +
-   8×6-bit mins packed, `d`/`dmin` f16, 4-bit quants). Port from the ggml
-   `dequantize_row_q4_K` spec, commented.
-3. WGSL dequant kernel, same math.
-4. `kiln dequant` diffs GPU vs CPU element-wise; assert max relative error
-   < 1e-3.
-5. Cross-check the CPU reference against `llama.cpp`'s own dequant
-   (`llama-quantize --dry-run` style, or a tiny C harness) so the oracle is
-   trusted, not just self-consistent.
+Built: `gguf.rs` (minimal GGUF v3 reader), `dequant.rs` (CPU reference, ported
+line-by-line from ggml `dequantize_row_q4_K` / `get_scale_min_k4`),
+`shaders/dequant_q4k.wgsl` (one invocation per 256-elem super-block),
+`kiln tensors` + `kiln dequant` CLI, `scripts/oracle_q4k.py` (independent check
+against the `gguf` Python package).
+
+Tested on real Qwen3-0.6B-Q4_K_M weights (`blk.0.attn_k.weight` [1024×1024],
+`blk.0.attn_q.weight` [1024×2048], `blk.5.ffn_gate.weight`, `blk.13.ffn_up.weight`):
+
+| Comparison | max abs err | max rel err |
+|---|---|---|
+| kiln WGSL kernel vs kiln CPU reference | `0.0` | `0.0` |
+| kiln CPU reference vs `gguf` package (independent impl) | `0.0` | `0.0` |
+
+Bit-exact on both legs — not just "within tolerance." The CPU reference is a
+trusted oracle (matches a separately-authored implementation), and the WGSL
+kernel matches the CPU reference exactly. **The silent-garbage failure mode is
+closed for Q4_K.**
+
+Repro:
+```
+KILN_DUMP=/tmp/k.f32 cargo run -p kiln-cli -- dequant ~/models/Qwen3-0.6B-Q4_K_M.gguf blk.0.attn_k.weight
+# oracle needs: uv pip install --python <venv> gguf numpy
+python scripts/oracle_q4k.py ~/models/Qwen3-0.6B-Q4_K_M.gguf blk.0.attn_k.weight /tmp/k.f32
+```
+
+Synthetic unit tests (`cargo test -p kiln-core`) cover the zero-scale and
+identity-nibble cases and run in CI without the model file.
+
+**Notes for the real engine:**
+- The GPU path here round-trips through a MAP_READ buffer every call — fine for a
+  diff harness, must not survive into the forward pass (dequant output stays on
+  the GPU, fused into matmul).
+- `d`/`dmin` are decoded with `unpack2x16float` in WGSL — confirmed to match the
+  Rust `f16_to_f32`. No `shader-f16` feature needed for the *unpack*.
+- Q6_K (used for ~half the Qwen3-0.6B tensors — `attn_v`, `ffn_down` on many
+  layers) is still TODO. Same harness, different block layout (210 bytes).
 
 ---
 
