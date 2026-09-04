@@ -171,6 +171,43 @@ identity-nibble cases and run in CI without the model file.
 
 ## Spike 3 — Approach validation via wgpu-llm
 
-**TODO.** Fork `Beledarian/wgpu-llm`, run native (expect ~25–66 tok/s per its
-README), then get it in-browser Chrome with one `CommandEncoder` per token.
-Confirms the whole architecture before investing in Q4_K.
+**PASS** (2026-09-04)
+
+`wgpu-llm` built clean (wgpu v29, 12 WGSL shaders). Ran TinyLlama-1.1B-Chat f16
+on the RX 9070 XT:
+
+```
+Generated 128 tokens in 1.53s (83.6 tok/s)
+forward(avg=2.13 ms, steps=141)
+argmax/readback(avg=8.71 ms, steps=141)
+```
+
+- **A hand-rolled wgpu + WGSL transformer forward pass reaches ~84 tok/s native**
+  on this GPU (README: 66 on RTX 3090). The architecture kiln plans — per-layer
+  WGSL dispatches, KV paging, f16 storage / f32 compute, dequant-in-shader — is
+  proven viable and fast.
+- **Readback is 4× the compute.** 8.71 ms per token pulling logits to CPU for
+  sampling vs 2.13 ms for the forward pass. Confirms Maczan (arXiv 2608.08730)
+  and the CLAUDE.md rule: sample on-GPU (GPU argmax for greedy), never sync
+  per-token. Removing readback would lift the native ceiling to ~470 tok/s →
+  ~47 tok/s even at a 10× browser penalty, inside the 40–100 target.
+- **wgpu-llm has no wasm target** (`cli` + `core` crates only, no web-sys). The
+  "run it in-browser" half of this spike isn't possible without porting it —
+  which is kiln. Spike #1 already proved wgpu compute + f16 run in Zen and
+  Chromium, so that risk is covered.
+- wgpu-llm uses **safetensors**, not GGUF, and is **Llama-arch only** — it's a
+  reference to read (shader structure, KV paging, f16 packing), not a base to
+  fork for a GGUF + Qwen3 engine.
+
+## All four spikes clear — greenlight to build
+
+| Spike | Result |
+|---|---|
+| #1 WebGPU reality | wgpu compute + f16 work native, in Zen, in Chromium. No subgroups via wgpu-wasm. 128 MiB binding baseline. |
+| #2 Q4_K dequant | bit-exact GPU == CPU == gguf package on real weights |
+| #3 approach validation | hand-rolled wgpu+WGSL LLM = 84 tok/s native; readback is the bottleneck, not kernels |
+| #4 HF Range/CORS | plain browser fetch() Range works cross-origin, no proxy |
+
+Design constraints locked: GGUF Q4_K_M + Q8_0, f16 storage / f32 compute,
+scalar reductions (no subgroups), single CommandEncoder per token, GPU-side
+sampling, 128 MiB max binding, OPFS streaming loader.
