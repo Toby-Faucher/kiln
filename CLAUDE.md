@@ -53,6 +53,9 @@ hybrid is a WGSL research subproject, not a config swap.
 
 ## The four spikes (do these BEFORE committing weeks)
 
+Progress lives in `docs/spikes.md`. Status: **#1 native PASS**, **#4 PASS**
+(no proxy needed), #1 browser + #2 + #3 open.
+
 1. **WebGPU reality check** (~1 day). Run `webgpureport.org` + a 20-line `wgpu`
    compute shader in Chrome **and** in Zen, on this Arch box. Capture
    `adapter.limits`, `shader-f16`, `subgroups`. Firefox/Zen WebGPU on Linux is
