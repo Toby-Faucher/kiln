@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>kiln · spike #1</title>
+    <style>
+      body { font: 14px/1.5 ui-monospace, monospace; margin: 2rem; max-width: 60ch; }
+      pre { background: #1113; padding: 1rem; border-radius: 6px; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <h1>kiln · WebGPU probe</h1>
+    <p>Open this in Chrome and in Zen. Compare the output.</p>
+    <pre id="out">running…</pre>
+    <script type="module">
+      const out = document.getElementById("out");
+      if (!navigator.gpu) {
+        out.textContent = "navigator.gpu is undefined — this browser has no WebGPU.";
+      } else {
+        // The engine runs in a Worker; the probe is small enough to inline here.
+        const w = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
+        w.onmessage = (e) => { out.textContent = e.data; };
+        w.onerror = (e) => { out.textContent = "worker error: " + e.message; };
+        w.postMessage("probe");
+      }
+    </script>
+  </body>
+</html>

@@ -114,9 +114,46 @@ Full research: `~/research/in-browser-llm-rust-webgpu-2026-09.md` and
 notes). Both are accurate on facts; where they disagreed on the target model,
 the newer-models call (Qwen3.5 exists, is Apache-2.0) won.
 
+## Repo layout
+
+```
+crates/kiln-core/   engine: gpu acquisition, compute helpers, backend trait,
+                    (todo) gguf parser, dequant kernels, model graph, KV cache
+        shaders/    WGSL — one CPU reference impl + diff test per kernel
+crates/kiln-wasm/   cdylib — the API the Web Worker calls (probe(); later: chat)
+crates/kiln-cli/    native `kiln` bin — spike harness (`kiln probe`, `kiln dequant`)
+web/                spike #1 browser harness (index.html + worker.js)
+.cargo/config.toml  wasm32 build flags (native builds untouched)
+```
+
+Native probe: `cargo run -p kiln-cli -- probe`
+Browser probe: `wasm-pack build crates/kiln-wasm --target web --out-dir ../../web/pkg`
+then serve `web/` over http and open in Chrome + Zen.
+
+The wgpu 30 calls in `gpu.rs` / `compute.rs` are written from the docs, not
+compile-verified against 30.0.1 — reconcile any signature drift with
+<https://docs.rs/wgpu/30.0.1> as the first task.
+
+## Branch flow / how GitHub works here
+
+`PR → dev → alpha → prod`
+
+- **`prod`** — release branch. Only ever fast-forwarded from `alpha`. Tagged on release.
+- **`alpha`** — integration / pre-release. `dev` merges up when a milestone is
+  stable enough to dogfood.
+- **`dev`** — default branch, where day-to-day work lands.
+- **feature branches → PR into `dev`.** Every change goes through a PR, even
+  solo. Squash-merge. CI (fmt + clippy + test + `wasm-pack build`) must pass.
+
+Promotions (`dev → alpha`, `alpha → prod`) are also PRs, merge-commit (not
+squash) so history is preserved. Never commit straight to `dev`, `alpha`, or
+`prod`.
+
 ## Conventions
 
 - Match surrounding code style. Comment density follows the file you're in.
-- WGSL shaders live in `crates/*/shaders/`. Every kernel gets a CPU reference
-  implementation and a test that diffs them.
+- WGSL shaders live next to the crate that owns them, in `shaders/`. Every kernel
+  gets a CPU reference implementation and a test that diffs them (rel. err
+  < 1e-3 for dequant, < 1e-2 for late-layer activations).
 - Don't add dependencies without a reason that goes in the commit message.
+- Conventional-ish commit subjects (`core:`, `wasm:`, `cli:`, `docs:`, `ci:`).
